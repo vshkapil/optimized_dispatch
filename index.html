@@ -56,6 +56,8 @@ L.marker([depot.lat, depot.lng]).addTo(map).bindPopup("Depot");
 let routesLayer = {};
 let colors = ["red","blue","green","purple","orange","brown","black"];
 
+/* ===================== MAIN ====================== */
+
 async function generatePlan(){
 
     let invoices = await readExcel("invoiceFile");
@@ -72,9 +74,12 @@ async function generatePlan(){
     assignVehicles(routes, vehicles);
 
     await drawRoutes(routes);
+
     createLegend(routes);
     createSchedule(routes);
 }
+
+/* ===================== READ EXCEL ====================== */
 
 function readExcel(id){
     return new Promise(resolve=>{
@@ -91,7 +96,7 @@ function readExcel(id){
     });
 }
 
-/* ---------- CLARKE WRIGHT USING EUCLIDEAN ---------- */
+/* ===================== CLARKE WRIGHT ====================== */
 
 function distance(a,b){
     let dx = a.Latitude - b.Latitude;
@@ -143,14 +148,14 @@ function clarkeWright(invoices){
     return routes;
 }
 
-/* ---------- VEHICLE ASSIGNMENT ---------- */
+/* ===================== VEHICLE ASSIGNMENT ====================== */
 
 function assignVehicles(routes, vehicles){
 
     vehicles.sort((a,b)=>b.Capacity - a.Capacity);
     routes.sort((a,b)=>b.load - a.load);
 
-    routes.forEach((r,i)=>{
+    routes.forEach(r=>{
         let assigned = vehicles.find(v=>!v.used && v.Capacity >= r.load);
         if(assigned){
             r.vehicle = assigned.VehicleNo;
@@ -161,7 +166,7 @@ function assignVehicles(routes, vehicles){
     });
 }
 
-/* ---------- ROUTE DRAWING ---------- */
+/* ===================== DRAW ROUTES ====================== */
 
 async function drawRoutes(routes){
 
@@ -178,7 +183,8 @@ async function drawRoutes(routes){
 
         coords.push([depot.lat,depot.lng]);
 
-        let geo = await getRoute(coords);
+        let geo = await getRouteSafe(coords);
+
         if(!geo) continue;
 
         let poly = L.geoJSON(geo,{
@@ -190,7 +196,15 @@ async function drawRoutes(routes){
     }
 }
 
-async function getRoute(coords){
+/* ===================== SAFE OSRM ====================== */
+
+async function getRouteSafe(coords){
+
+    // OSRM limit: ~100 coordinates
+    if(coords.length > 95){
+        alert("Too many stops in one vehicle. Reduce clustering.");
+        return null;
+    }
 
     let coordStr = coords.map(c=>c[1]+","+c[0]).join(";");
 
@@ -212,7 +226,7 @@ async function getRoute(coords){
     }
 }
 
-/* ---------- UI ---------- */
+/* ===================== UI ====================== */
 
 function createLegend(routes){
 
@@ -276,6 +290,6 @@ function clearMap(){
 }
 
 </script>
-
 </body>
+
 </html>
