@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Daily Dispatch Route Planner - Clarke Wright</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+body { font-family: Arial; margin: 20px; }
+#map { height: 600px; margin-top: 20px; }
+#legend { margin-top: 15px; }
+.vehicle-btn {
+    display:inline-block;
+    padding:6px 10px;
+    margin:4px;
+    border-radius:4px;
+    color:white;
+    cursor:pointer;
+}
+table { border-collapse: collapse; margin-top:20px; width:100%; }
+th, td { border:1px solid #ccc; padding:6px; font-size:12px; }
+th { background:#f0f0f0; }
+</style>
+</head>
+
+<body>
+
+<h2>Daily Dispatch Route Planner (Clarke-Wright | Road Based)</h2>
+
+<label>Upload Invoice File:</label>
+<input type="file" id="invoiceFile"><br><br>
+
+<label>Upload Vehicle File:</label>
+<input type="file" id="vehicleFile"><br><br>
+
+<button onclick="generatePlan()">Generate Route Plan</button>
+
+<div id="legend"></div>
+<div id="map"></div>
+<div id="schedule"></div>
+
+<script>
+
+const depot = { lat:22.8241, lng:72.6089 };
+let map = L.map('map').setView([depot.lat, depot.lng], 9);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution:'© OpenStreetMap'
+}).addTo(map);
+
+L.marker([depot.lat, depot.lng]).addTo(map).bindPopup("Depot");
+
+let routesLayer = {};
+let colors = ["red","blue","green","purple","orange","brown","black"];
+
+async function generatePlan(){
+
+    let invoices = await readExcel("invoiceFile");
+    let vehicles = await readExcel("vehicleFile");
+
+    if(!invoices || !vehicles){
+        alert("Upload both files");
+        return;
+    }
+
+    clearMap();
+
+    let routes = clarkeWright(invoices);
+    assignVehicles(routes, vehicles);
+
+    await drawRoutes(routes);
+    createLegend(routes);
+    createSchedule(routes);
+}
+
+function readExcel(id){
+    return new Promise(resolve=>{
+        let file = document.getElementById(id).files[0];
+        if(!file) return resolve(null);
+        let reader = new FileReader();
+        reader.onload = e=>{
+            let data = new Uint8Array(e.target.result);
+            let wb = XLSX.read(data,{type:'array'});
+            let sheet = wb.Sheets[wb.SheetNames[0]];
+            resolve(XLSX.utils.sheet_to_json(sheet));
+        };
+        reader.readAsArrayBuffer(file);
+    });
+}
+
+/* ---------- CLARKE WRIGHT USING EUCLIDEAN ---------- */
+
+function distance(a,b){
+    let dx = a.Latitude - b.Latitude;
+    let dy = a.Longitude - b.Longitude;
+    return Math.sqrt(dx*dx + dy*dy)*111;
+}
+
+function depotDistance(p){
+    let dx = depot.lat - p.Latitude;
+    let dy = depot.lng - p.Longitude;
+    return Math.sqrt(dx*dx + dy*dy)*111;
+}
+
+function clarkeWright(invoices){
+
+    let routes = invoices.map((inv,i)=>({
+        stops:[inv],
+        load:parseFloat(inv.Weight),
+        index:[i]
+    }));
+
+    let savings=[];
+
+    for(let i=0;i<invoices.length;i++){
+        for(let j=i+1;j<invoices.length;j++){
+            let s = depotDistance(invoices[i]) +
+                    depotDistance(invoices[j]) -
+                    distance(invoices[i], invoices[j]);
+            savings.push({i,j,s});
+        }
+    }
+
+    savings.sort((a,b)=>b.s-a.s);
+
+    savings.forEach(pair=>{
+
+        let r1 = routes.find(r=>r.index.includes(pair.i));
+        let r2 = routes.find(r=>r.index.includes(pair.j));
+
+        if(!r1 || !r2 || r1===r2) return;
+
+        r1.stops = r1.stops.concat(r2.stops);
+        r1.index = r1.index.concat(r2.index);
+        r1.load += r2.load;
+
+        routes = routes.filter(r=>r!==r2);
+    });
+
+    return routes;
+}
+
+/* ---------- VEHICLE ASSIGNMENT ---------- */
+
+function assignVehicles(routes, vehicles){
+
+    vehicles.sort((a,b)=>b.Capacity - a.Capacity);
+    routes.sort((a,b)=>b.load - a.load);
+
+    routes.forEach((r,i)=>{
+        let assigned = vehicles.find(v=>!v.used && v.Capacity >= r.load);
+        if(assigned){
+            r.vehicle = assigned.VehicleNo;
+            assigned.used = true;
+        } else {
+            r.vehicle = "Unassigned";
+        }
+    });
+}
+
+/* ---------- ROUTE DRAWING ---------- */
+
+async function drawRoutes(routes){
+
+    for(let i=0;i<routes.length;i++){
+
+        let r = routes[i];
+        if(r.vehicle==="Unassigned") continue;
+
+        let coords = [[depot.lat,depot.lng]];
+
+        r.stops.forEach(s=>{
+            coords.push([s.Latitude,s.Longitude]);
+        });
+
+        coords.push([depot.lat,depot.lng]);
+
+        let geo = await getRoute(coords);
+        if(!geo) continue;
+
+        let poly = L.geoJSON(geo,{
+            style:{color:colors[i%colors.length],weight:5}
+        }).addTo(map);
+
+        routesLayer[r.vehicle]=poly;
+        r.totalKm = geo.properties.distance;
+    }
+}
+
+async function getRoute(coords){
+
+    let coordStr = coords.map(c=>c[1]+","+c[0]).join(";");
+
+    let url=`https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=full&geometries=geojson`;
+
+    try{
+        let res=await fetch(url);
+        if(!res.ok) return null;
+
+        let data=await res.json();
+        if(!data.routes || data.routes.length===0) return null;
+
+        let geo = data.routes[0].geometry;
+        geo.properties={distance:data.routes[0].distance/1000};
+        return geo;
+
+    }catch{
+        return null;
+    }
+}
+
+/* ---------- UI ---------- */
+
+function createLegend(routes){
+
+    let legend=document.getElementById("legend");
+    legend.innerHTML="<b>Vehicles:</b><br>";
+
+    legend.innerHTML+=`<div class="vehicle-btn" style="background:gray" onclick="showAll()">Show All</div>`;
+
+    routes.forEach((r,i)=>{
+        if(r.vehicle==="Unassigned") return;
+        legend.innerHTML+=`
+        <div class="vehicle-btn"
+        style="background:${colors[i%colors.length]}"
+        onclick="showVehicle('${r.vehicle}')">
+        ${r.vehicle}
+        </div>`;
+    });
+}
+
+function showVehicle(v){
+    for(let key in routesLayer){
+        map.removeLayer(routesLayer[key]);
+    }
+    if(routesLayer[v]) routesLayer[v].addTo(map);
+}
+
+function showAll(){
+    for(let key in routesLayer){
+        routesLayer[key].addTo(map);
+    }
+}
+
+function createSchedule(routes){
+
+    let html="<h3>Vehicle Wise Schedule</h3>";
+    html+="<table><tr><th>Vehicle</th><th>Stop Order</th><th>Dealer</th><th>Invoice</th><th>Weight</th><th>Total KM</th></tr>";
+
+    routes.forEach(r=>{
+        if(r.vehicle==="Unassigned") return;
+        r.stops.forEach((s,index)=>{
+            html+=`<tr>
+            <td>${r.vehicle}</td>
+            <td>${index+1}</td>
+            <td>${s.DealerName}</td>
+            <td>${s.InvoiceNo}</td>
+            <td>${s.Weight}</td>
+            <td>${r.totalKm ? r.totalKm.toFixed(2) : "-"}</td>
+            </tr>`;
+        });
+    });
+
+    html+="</table>";
+    document.getElementById("schedule").innerHTML=html;
+}
+
+function clearMap(){
+    for(let key in routesLayer){
+        map.removeLayer(routesLayer[key]);
+    }
+    routesLayer={};
+}
+
+</script>
+
+</body>
+</html>
